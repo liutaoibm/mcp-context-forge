@@ -4143,7 +4143,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
     async def _refresh_gateway_tools_resources_prompts(
         self,
         gateway_id: str,
-        user_email: Optional[str] = None,
+        _user_email: Optional[str] = None,
         created_via: str = "health_check",
     ) -> Dict[str, int]:
         """Refresh tools, resources, and prompts for a gateway during health checks.
@@ -4157,7 +4157,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
 
         Args:
             gateway_id: ID of the gateway to refresh
-            user_email: Optional user email for OAuth token lookup
+            _user_email: Optional user email for OAuth token lookup
             created_via: String indicating creation source (default: "health_check")
 
         Returns:
@@ -4203,7 +4203,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
 
         # Fetch tools/resources/prompts from MCP server (no DB connection held)
         try:
-            capabilities, tools, resources, prompts = await self._initialize_gateway(
+            _capabilities, tools, resources, prompts = await self._initialize_gateway(
                 url=gateway_url,
                 authentication=gateway_auth_value,
                 transport=gateway_transport,
@@ -4303,15 +4303,17 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
                     db.flush()
                 result["prompts_added"] = len(prompts_to_add)
 
-            # Only commit if there were actual changes
-            total_changes = sum(result.values())
-            if total_changes > 0:
+            # Only commit if there were actual changes (adds, removes, OR updates)
+            total_add_remove_changes = sum(result.values())
+            has_updated_records  = len(db.dirty) > 0
+            if total_add_remove_changes > 0 or has_updated_records :
                 db.commit()
                 logger.info(
                     f"Refreshed gateway {gateway_name}: "
                     f"tools(+{result['tools_added']}/-{result['tools_removed']}), "
                     f"resources(+{result['resources_added']}/-{result['resources_removed']}), "
                     f"prompts(+{result['prompts_added']}/-{result['prompts_removed']})"
+                    + (f", updated {len(db.dirty)} existing items" if has_updated_records  else "")
                 )
 
                 # Invalidate caches
