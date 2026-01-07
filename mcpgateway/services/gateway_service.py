@@ -4163,6 +4163,47 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
         Returns:
             Dict with counts: {tools_added, tools_removed, resources_added,
                               resources_removed, prompts_added, prompts_removed}
+
+        Examples:
+            >>> from mcpgateway.services.gateway_service import GatewayService
+            >>> from unittest.mock import patch, MagicMock, AsyncMock
+            >>> import asyncio
+
+            >>> # Test gateway not found returns empty result
+            >>> service = GatewayService()
+            >>> mock_session = MagicMock()
+            >>> mock_session.execute.return_value.scalar_one_or_none.return_value = None
+            >>> with patch('mcpgateway.services.gateway_service.fresh_db_session') as mock_fresh:
+            ...     mock_fresh.return_value.__enter__.return_value = mock_session
+            ...     result = asyncio.run(service._refresh_gateway_tools_resources_prompts('gw-123'))
+            >>> result == {'tools_added': 0, 'tools_removed': 0, 'resources_added': 0, 'resources_removed': 0, 'prompts_added': 0, 'prompts_removed': 0}
+            True
+
+            >>> # Test disabled gateway returns empty result
+            >>> mock_gw = MagicMock()
+            >>> mock_gw.enabled = False
+            >>> mock_gw.reachable = True
+            >>> mock_gw.name = 'test_gw'
+            >>> mock_session.execute.return_value.scalar_one_or_none.return_value = mock_gw
+            >>> with patch('mcpgateway.services.gateway_service.fresh_db_session') as mock_fresh:
+            ...     mock_fresh.return_value.__enter__.return_value = mock_session
+            ...     result = asyncio.run(service._refresh_gateway_tools_resources_prompts('gw-123'))
+            >>> result['tools_added']
+            0
+
+            >>> # Test unreachable gateway returns empty result
+            >>> mock_gw.enabled = True
+            >>> mock_gw.reachable = False
+            >>> with patch('mcpgateway.services.gateway_service.fresh_db_session') as mock_fresh:
+            ...     mock_fresh.return_value.__enter__.return_value = mock_session
+            ...     result = asyncio.run(service._refresh_gateway_tools_resources_prompts('gw-123'))
+            >>> result['tools_added']
+            0
+
+            >>> # Test method is async and callable
+            >>> import inspect
+            >>> inspect.iscoroutinefunction(service._refresh_gateway_tools_resources_prompts)
+            True
         """
         result = {
             "tools_added": 0,
