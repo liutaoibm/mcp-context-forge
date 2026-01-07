@@ -7390,7 +7390,6 @@ async def admin_a2a_partial_html(
 @admin_router.get("/a2a/ids", response_class=JSONResponse)
 async def admin_get_all_agent_ids(
     include_inactive: bool = False,
-    gateway_id: Optional[str] = Query(None, description="Filter by gateway ID(s), comma-separated"),
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
 ):
@@ -7401,7 +7400,6 @@ async def admin_get_all_agent_ids(
 
     Args:
         include_inactive (bool): When True include a2a agents that are inactive.
-        gateway_id (Optional[str]): Filter by gateway ID(s), comma-separated. Accepts the literal value 'null' to indicate NULL gateway_id (local a2a agents).
         db (Session): Database session (injected dependency).
         user: Authenticated user object from dependency injection.
 
@@ -7416,9 +7414,6 @@ async def admin_get_all_agent_ids(
     team_ids = [t.id for t in user_teams]
 
     query = select(DbA2AAgent.id)
-
-    # Note: A2A agents don't have gateway_id field, they connect directly via endpoint_url
-    # The gateway_id parameter is ignored for A2A agents
 
     if not include_inactive:
         query = query.where(DbA2AAgent.enabled.is_(True))
@@ -7437,7 +7432,6 @@ async def admin_search_a2a_agents(
     q: str = Query("", description="Search query"),
     include_inactive: bool = False,
     limit: int = Query(100, ge=1, le=1000),
-    gateway_id: Optional[str] = Query(None, description="Filter by gateway ID(s), comma-separated"),
     db: Session = Depends(get_db),
     user=Depends(get_current_user_with_permissions),
 ):
@@ -7451,7 +7445,6 @@ async def admin_search_a2a_agents(
         q (str): Search query string.
         include_inactive (bool): When True include a2a agents that are inactive.
         limit (int): Maximum number of results to return (bounded by the query parameter).
-        gateway_id (Optional[str]): Filter by gateway ID(s), comma-separated.
         db (Session): Database session (injected dependency).
         user: Authenticated user object from dependency injection.
 
@@ -7470,9 +7463,6 @@ async def admin_search_a2a_agents(
     team_ids = [t.id for t in user_teams]
 
     query = select(DbA2AAgent.id, DbA2AAgent.name, DbA2AAgent.endpoint_url, DbA2AAgent.description)
-
-    # Note: A2A agents don't have gateway_id field, they connect directly via endpoint_url
-    # The gateway_id parameter is ignored for A2A agents
 
     if not include_inactive:
         query = query.where(DbA2AAgent.enabled.is_(True))
