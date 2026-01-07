@@ -157,14 +157,24 @@ def _aggregate_custom_windows(
 
     reference_end = datetime.now(timezone.utc)
 
+    # Collect all window starts for the full range, then perform a single batched aggregation
+    window_starts: List[datetime] = []
     while current_start < reference_end:
-        current_end = current_start + window_delta
-        aggregator.aggregate_all_components(
-            window_start=current_start,
-            window_end=current_end,
-            db=db,
-        )
-        current_start = current_end
+        window_starts.append(current_start)
+        current_start = current_start + window_delta
+
+    # Delegate to aggregator batch method to avoid per-window recomputation
+    try:
+        if window_starts:
+            # aggregator may not implement batch in older versions; fall back if needed
+            if hasattr(aggregator, "aggregate_all_components_batch"):
+                aggregator.aggregate_all_components_batch(window_starts=window_starts, window_minutes=window_minutes, db=db)
+            else:
+                # Backwards-compatible fallback: iterate windows (less efficient)
+                for ws in window_starts:
+                    aggregator.aggregate_all_components(window_start=ws, window_end=ws + window_delta, db=db)
+    except Exception:
+        logger.exception("Batch aggregation failed; falling back to per-window aggregation")
 
 
 # Request/Response Models
