@@ -143,6 +143,9 @@ class LogAggregator:
 
         Returns:
             List of created/updated PerformanceMetric records
+
+        Raises:
+            Exception: If a database operation fails during aggregation.
         """
         if not self.enabled:
             return []
