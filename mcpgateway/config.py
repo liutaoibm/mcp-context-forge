@@ -1215,6 +1215,11 @@ class Settings(BaseSettings):
     unhealthy_threshold: int = 3
     # Max concurrent health checks per worker
     max_concurrent_health_checks: int = 10
+    
+    # Auto-refresh tools/resources/prompts from gateways during health checks
+    # When enabled, tools/resources/prompts are fetched and synced with DB during health checks
+    auto_refresh_servers: bool = Field(default=False, description="Enable automatic tool/resource/prompt refresh during gateway health checks")
+
 
     # Validation Gateway URL
     gateway_validation_timeout: int = 5  # seconds

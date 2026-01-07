@@ -3256,6 +3256,17 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
                     except Exception as update_error:
                         logger.warning(f"Failed to update last_seen for gateway {gateway_name}: {update_error}")
 
+                    # Auto-refresh tools/resources/prompts if enabled
+                    if settings.auto_refresh_servers:
+                        try:
+                            await self._refresh_gateway_tools_resources_prompts(
+                                gateway_id=gateway_id,
+                                user_email=user_email,
+                                created_via="health_check",
+                            )
+                        except Exception as refresh_error:
+                            logger.warning(f"Failed to refresh tools for gateway {gateway_name}: {refresh_error}")
+
                     if span:
                         span.set_attribute("health.status", "healthy")
                         span.set_attribute("success", True)
@@ -4128,6 +4139,188 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
                 continue
 
         return prompts_to_add
+
+    async def _refresh_gateway_tools_resources_prompts(
+        self,
+        gateway_id: str,
+        user_email: Optional[str] = None,
+        created_via: str = "health_check",
+    ) -> Dict[str, int]:
+        """Refresh tools, resources, and prompts for a gateway during health checks.
+
+        Fetches the latest tools/resources/prompts from the MCP server and syncs
+        with the database (add new, update changed, remove stale). Only performs
+        DB operations if actual changes are detected.
+
+        This method uses fresh_db_session() internally to avoid holding
+        connections during HTTP calls to MCP servers.
+
+        Args:
+            gateway_id: ID of the gateway to refresh
+            user_email: Optional user email for OAuth token lookup
+            created_via: String indicating creation source (default: "health_check")
+
+        Returns:
+            Dict with counts: {tools_added, tools_removed, resources_added,
+                              resources_removed, prompts_added, prompts_removed}
+        """
+        result = {
+            "tools_added": 0,
+            "tools_removed": 0,
+            "resources_added": 0,
+            "resources_removed": 0,
+            "prompts_added": 0,
+            "prompts_removed": 0,
+        }
+
+        # Fetch gateway data using fresh session
+        with fresh_db_session() as db:
+            gateway = db.execute(
+                select(DbGateway)
+                .options(
+                    selectinload(DbGateway.tools),
+                    selectinload(DbGateway.resources),
+                    selectinload(DbGateway.prompts),
+                )
+                .where(DbGateway.id == gateway_id)
+            ).scalar_one_or_none()
+
+            if not gateway:
+                logger.warning(f"Gateway {gateway_id} not found for tool refresh")
+                return result
+
+            if not gateway.enabled or not gateway.reachable:
+                logger.debug(f"Skipping tool refresh for disabled/unreachable gateway {gateway.name}")
+                return result
+
+            gateway_name = gateway.name
+            gateway_url = gateway.url
+            gateway_transport = gateway.transport
+            gateway_auth_type = gateway.auth_type
+            gateway_auth_value = gateway.auth_value
+            gateway_oauth_config = gateway.oauth_config
+            gateway_ca_certificate = gateway.ca_certificate
+
+        # Fetch tools/resources/prompts from MCP server (no DB connection held)
+        try:
+            capabilities, tools, resources, prompts = await self._initialize_gateway(
+                url=gateway_url,
+                authentication=gateway_auth_value,
+                transport=gateway_transport,
+                auth_type=gateway_auth_type,
+                oauth_config=gateway_oauth_config,
+                ca_certificate=gateway_ca_certificate.encode() if gateway_ca_certificate else None,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch tools from gateway {gateway_name}: {e}")
+            return result
+
+        # If no tools/resources/prompts returned (e.g., auth_code flow not completed), skip
+        if not tools and not resources and not prompts:
+            logger.debug(f"No tools/resources/prompts returned from gateway {gateway_name}")
+            return result
+
+        # Update database with fresh session
+        with fresh_db_session() as db:
+            # Re-fetch gateway with relationships for update
+            gateway = db.execute(
+                select(DbGateway)
+                .options(
+                    selectinload(DbGateway.tools),
+                    selectinload(DbGateway.resources),
+                    selectinload(DbGateway.prompts),
+                )
+                .where(DbGateway.id == gateway_id)
+            ).scalar_one_or_none()
+
+            if not gateway:
+                return result
+
+            new_tool_names = [tool.name for tool in tools]
+            new_resource_uris = [resource.uri for resource in resources]
+            new_prompt_names = [prompt.name for prompt in prompts]
+
+            # Update/create tools, resources, and prompts
+            tools_to_add = self._update_or_create_tools(db, tools, gateway, created_via)
+            resources_to_add = self._update_or_create_resources(db, resources, gateway, created_via)
+            prompts_to_add = self._update_or_create_prompts(db, prompts, gateway, created_via)
+
+            # Find and remove stale tools
+            stale_tool_ids = [tool.id for tool in gateway.tools if tool.original_name not in new_tool_names]
+            if stale_tool_ids:
+                for i in range(0, len(stale_tool_ids), 500):
+                    chunk = stale_tool_ids[i : i + 500]
+                    db.execute(delete(ToolMetric).where(ToolMetric.tool_id.in_(chunk)))
+                    db.execute(delete(server_tool_association).where(server_tool_association.c.tool_id.in_(chunk)))
+                    db.execute(delete(DbTool).where(DbTool.id.in_(chunk)))
+                result["tools_removed"] = len(stale_tool_ids)
+
+            # Find and remove stale resources
+            stale_resource_ids = [resource.id for resource in gateway.resources if resource.uri not in new_resource_uris]
+            if stale_resource_ids:
+                for i in range(0, len(stale_resource_ids), 500):
+                    chunk = stale_resource_ids[i : i + 500]
+                    db.execute(delete(ResourceMetric).where(ResourceMetric.resource_id.in_(chunk)))
+                    db.execute(delete(server_resource_association).where(server_resource_association.c.resource_id.in_(chunk)))
+                    db.execute(delete(ResourceSubscription).where(ResourceSubscription.resource_id.in_(chunk)))
+                    db.execute(delete(DbResource).where(DbResource.id.in_(chunk)))
+                result["resources_removed"] = len(stale_resource_ids)
+
+            # Find and remove stale prompts
+            stale_prompt_ids = [prompt.id for prompt in gateway.prompts if prompt.original_name not in new_prompt_names]
+            if stale_prompt_ids:
+                for i in range(0, len(stale_prompt_ids), 500):
+                    chunk = stale_prompt_ids[i : i + 500]
+                    db.execute(delete(PromptMetric).where(PromptMetric.prompt_id.in_(chunk)))
+                    db.execute(delete(server_prompt_association).where(server_prompt_association.c.prompt_id.in_(chunk)))
+                    db.execute(delete(DbPrompt).where(DbPrompt.id.in_(chunk)))
+                result["prompts_removed"] = len(stale_prompt_ids)
+
+            # Expire gateway if stale items were deleted
+            if stale_tool_ids or stale_resource_ids or stale_prompt_ids:
+                db.expire(gateway)
+
+            # Add new items in chunks
+            chunk_size = 50
+            if tools_to_add:
+                for i in range(0, len(tools_to_add), chunk_size):
+                    chunk = tools_to_add[i : i + chunk_size]
+                    db.add_all(chunk)
+                    db.flush()
+                result["tools_added"] = len(tools_to_add)
+
+            if resources_to_add:
+                for i in range(0, len(resources_to_add), chunk_size):
+                    chunk = resources_to_add[i : i + chunk_size]
+                    db.add_all(chunk)
+                    db.flush()
+                result["resources_added"] = len(resources_to_add)
+
+            if prompts_to_add:
+                for i in range(0, len(prompts_to_add), chunk_size):
+                    chunk = prompts_to_add[i : i + chunk_size]
+                    db.add_all(chunk)
+                    db.flush()
+                result["prompts_added"] = len(prompts_to_add)
+
+            # Only commit if there were actual changes
+            total_changes = sum(result.values())
+            if total_changes > 0:
+                db.commit()
+                logger.info(
+                    f"Refreshed gateway {gateway_name}: "
+                    f"tools(+{result['tools_added']}/-{result['tools_removed']}), "
+                    f"resources(+{result['resources_added']}/-{result['resources_removed']}), "
+                    f"prompts(+{result['prompts_added']}/-{result['prompts_removed']})"
+                )
+
+                # Invalidate caches
+                cache = _get_registry_cache()
+                await cache.invalidate_tools()
+                tool_lookup_cache = _get_tool_lookup_cache()
+                await tool_lookup_cache.invalidate_gateway(str(gateway_id))
+
+        return result
 
     async def _publish_event(self, event: Dict[str, Any]) -> None:
         """Publish event to all subscribers.
