@@ -3261,7 +3261,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
                         try:
                             await self._refresh_gateway_tools_resources_prompts(
                                 gateway_id=gateway_id,
-                                user_email=user_email,
+                                _user_email=user_email,
                                 created_via="health_check",
                             )
                         except Exception as refresh_error:
@@ -4157,7 +4157,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
 
         Args:
             gateway_id: ID of the gateway to refresh
-            _user_email: Optional user email for OAuth token lookup
+            _user_email: Optional user email for OAuth token lookup (unused currently)
             created_via: String indicating creation source (default: "health_check")
 
         Returns:
@@ -4173,17 +4173,9 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
             "prompts_removed": 0,
         }
 
-        # Fetch gateway data using fresh session
+        # Fetch gateway metadata only (no relationships needed for MCP call)
         with fresh_db_session() as db:
-            gateway = db.execute(
-                select(DbGateway)
-                .options(
-                    selectinload(DbGateway.tools),
-                    selectinload(DbGateway.resources),
-                    selectinload(DbGateway.prompts),
-                )
-                .where(DbGateway.id == gateway_id)
-            ).scalar_one_or_none()
+            gateway = db.execute(select(DbGateway).where(DbGateway.id == gateway_id)).scalar_one_or_none()
 
             if not gateway:
                 logger.warning(f"Gateway {gateway_id} not found for tool refresh")
@@ -4193,6 +4185,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
                 logger.debug(f"Skipping tool refresh for disabled/unreachable gateway {gateway.name}")
                 return result
 
+            # Extract metadata before session closes
             gateway_name = gateway.name
             gateway_url = gateway.url
             gateway_transport = gateway.transport
@@ -4222,7 +4215,7 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
 
         # Update database with fresh session
         with fresh_db_session() as db:
-            # Re-fetch gateway with relationships for update
+            # Fetch gateway with relationships for update/comparison
             gateway = db.execute(
                 select(DbGateway)
                 .options(
@@ -4305,20 +4298,31 @@ class GatewayService:  # pylint: disable=too-many-instance-attributes
 
             # Only commit if there were actual changes (adds, removes, OR updates)
             total_add_remove_changes = sum(result.values())
-            has_updated_records  = len(db.dirty) > 0
-            if total_add_remove_changes > 0 or has_updated_records :
+
+            # tracking in place modifications from _update_or_create_* methods
+            updated_count = len(db.dirty)  # Capture before commit
+
+            has_changes = total_add_remove_changes > 0 or updated_count > 0
+
+            if has_changes:
                 db.commit()
                 logger.info(
                     f"Refreshed gateway {gateway_name}: "
                     f"tools(+{result['tools_added']}/-{result['tools_removed']}), "
                     f"resources(+{result['resources_added']}/-{result['resources_removed']}), "
-                    f"prompts(+{result['prompts_added']}/-{result['prompts_removed']})"
-                    + (f", updated {len(db.dirty)} existing items" if has_updated_records  else "")
+                    f"prompts(+{result['prompts_added']}/-{result['prompts_removed']})" + (f", updated {updated_count} existing items" if updated_count > 0 else "")
                 )
 
-                # Invalidate caches
+                # Invalidate all relevant caches
                 cache = _get_registry_cache()
-                await cache.invalidate_tools()
+                if result["tools_added"] > 0 or result["tools_removed"] > 0 or updated_count > 0:
+                    await cache.invalidate_tools()
+                if result["resources_added"] > 0 or result["resources_removed"] > 0:
+                    await cache.invalidate_resources()
+                if result["prompts_added"] > 0 or result["prompts_removed"] > 0:
+                    await cache.invalidate_prompts()
+
+                # Invalidate tool lookup cache for this gateway
                 tool_lookup_cache = _get_tool_lookup_cache()
                 await tool_lookup_cache.invalidate_gateway(str(gateway_id))
 
