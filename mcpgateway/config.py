@@ -1220,7 +1220,6 @@ class Settings(BaseSettings):
     # When enabled, tools/resources/prompts are fetched and synced with DB during health checks
     auto_refresh_servers: bool = Field(default=False, description="Enable automatic tool/resource/prompt refresh during gateway health checks")
 
-
     # Validation Gateway URL
     gateway_validation_timeout: int = 5  # seconds
     gateway_max_redirects: int = 5
